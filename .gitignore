@@ -2,6 +2,16 @@
 .Rhistory
 .Rapp.history
 
+# To delete
+-to-delete/
+
+# Data-raw and data-processed
+-data-raw/
+-data-processed/
+
+# Output
+-output
+
 # Session Data files
 .RData
 

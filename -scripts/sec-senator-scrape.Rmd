@@ -1,0 +1,323 @@
+---
+title: "Scraping Senate Financial Disclosures from SEC"
+author: "Cathryn Beeson-Lynch"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Load packages
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(rvest)
+library(RCurl)
+library(XML)
+library(magrittr)
+library(lubridate)
+detach(package:dplyr)
+library(dplyr)
+library(kableExtra)
+
+# Load custom functions
+source("../-fx/get-html-table.R")
+source("../-fx/get-hyperlinks.R")
+source("../-fx/get-html-table-nodes.R")
+source("../-fx/get-html-table-v2.R")
+
+load("../-data-raw/sec-senator-scrape-workspace-htmls.RData")
+```
+
+# Get recent SEC filings by senators
+We'll begin by extracting Senators' SEC filing pages from the SEC Senate Stock Disclosure web page. Then we'll crawl each Senator's filing page. 
+
+## Read HTML
+The first step is to use `read_html()` from the `rvest` package in order to extract the HTML code from the SEC Stock Disclosure page. 
+
+```{r eval=FALSE}
+# Read in HTML 
+sec_html <- read_html("https://sec.report/Senate-Stock-Disclosures/Filings")
+```
+
+## Extract table from HTML 
+The custom function `get.html.table()` extracts the table from the SEC web page, and it converts it into a data frame. The remainder of the code chunk cleans up the data frame and prepares it for joining with the hyperlink data frame that we'll create next.
+
+The `for loop` at the end is completely optional - it capitalizes the middle initial (if present) and puts a period after it. 
+
+```{r}
+sec_file_table <- get.html.table(sec_html) %>%
+  separate(col = Filed.Date.Report.ID, # separate first column
+           into = c("filed_date", "report_id"), 
+           sep = "\\n") %>%
+  mutate(filed_date = as_date(filed_date, format = "%Y-%m-%d"), # change class of date column
+         Reported.By = tolower(Reported.By) %>% tools::toTitleCase(), # fix Senator names
+         across(c(Reported.By, Shares.Held), as.factor)) %>% # convert characters to factors
+  select(filed_date, reported_by = Reported.By, report_type = Shares.Held, title = Title, report_id) %>% # reorder and rename variables 
+  dplyr::filter(is.na(report_id) == FALSE)  # filter first row with NA values
+
+# Check output
+head(sec_file_table)
+```
+
+
+```{r echo=FALSE}
+# Capitalize middle initials 
+for(i in 1:length(letters)){
+  sec_file_table$reported_by <- gsub(pattern = paste0(" ", letters[i], " "), 
+              replacement = paste0(" ", LETTERS[i], ". "), 
+              sec_file_table$reported_by)
+  
+} 
+
+# Check updated output
+# Check output
+head(sec_file_table)
+```
+
+## Extract hyperlinks 
+The following code chunk uses the custom function `get.hyperlinks()` which extracts the attributes of the nodes inside the table that we just scraped. 
+
+Since each row of the table contains two URLs: (a) URL for the specific report (`report_url`); and (b) URL for the Senator (`senator_url`), but the results are presented in a single column, we can separate the rows into two columns based on their index (even or odd).
+
+The last few lines in the following code chunk extract the report ID from the `report_url` strings since we're going to join both data frames on `report_id`.
+
+```{r}
+# Extract hyperlinks
+sec_urls <- get.hyperlinks(sec_html)
+
+# Complete the links
+sec_urls <- paste0("https://sec.report", sec_urls)
+
+# Separate report urls & senator urls
+even_indexes <- seq(2,1000,2) 
+odd_indexes <- seq(1,999,2)
+
+sec_urls <- data.frame(report_urls = sec_urls[odd_indexes], 
+                     senator_urls = sec_urls[even_indexes])
+
+# Joining data frames on report_id column 
+sec_urls %<>%
+  mutate(report_id = str_extract(report_urls, "(?<=/)([a-z]|\\-|[0-9])+$")) %>%
+  dplyr::filter(is.na(report_id) == FALSE) # omit first row
+
+# Check output 
+head(sec_urls)
+```
+
+### Join data frames together
+
+```{r}
+# Join together
+sec_table_joined <- sec_file_table %>%
+  inner_join(sec_urls, by = c("report_id"))
+
+# Check output
+head(sec_table_joined)
+```
+### View summary 
+We can use `count()` from the `dplyr` package to check out variation in the types of reports that Senators filed:  
+
+* **Annual:** Annual reports; contain information about the source, type, amount, or value of the incomes. [Click here for an example.](https://sec.report/Senate-Stock-Disclosures/Hyde-Smith/Cindy/57bfa4f2-a036-466e-86c5-52e19b91fe05)
+* **Extension-notice:** Documentation that a Senator received a due date extension notice. 
+* **Paper:** Paper filings for Annual and Periodic Transaction Reports; all of these submissions are in `GIF` format, and the information cannot be scraped using traditional web scraping or text mining methods.  
+* **PTR (Periodic Transaction Report):** 
+
+In the following section, we'll focus on scraping the information contained in each Senator's **PTRs (Periodic Transaction Reports):** Financial disclosure reports of transactions.
+
+```{r}
+sec_table_joined %>%
+  count(reported_by, report_type, .drop = FALSE) %>%
+  filter(nchar(as.character(report_type)) > 1) %>%
+  pivot_wider(names_from = report_type, values_from = n) %>%
+  head(n = 10)
+```
+
+```{r include=FALSE}
+# Save file
+write_csv(sec_table_joined, "../-data-raw/sec-file-dat.csv")
+save.image("../-data-raw/sec-senator-scrape-workspace.RData")
+
+# Clear workspace
+rm(list = setdiff(ls(), c("sec_table_joined", "sec_html")))
+```
+
+# Get transaction histories for all current senators
+We're going to use the URLs in the `senator_urls` column to crawl all of the transactions for all of the Senators in our dataset. We'll begin by extracting all After extracting all `r nrow(sen_urls)` Senator URLs, and then the remaining code chunks follow the same steps as before - extracting the HTML tables and URLs - with minor changes based on the nature of the data contained in the `sen_urls` data frame.. 
+
+```{r}
+# By senator 
+sen_urls <- sec_table_joined %>%
+  select(reported_by, senator_urls) %>%
+  unique() %>%
+  group_by(reported_by) %>%
+  slice(1) # some Senators have 2 identical pages
+
+# Check output
+sen_urls %>%
+  head(n = 10)
+```
+</div>
+## Read HTML for all Senator pages
+Below, we're using `getURIAsynchronous()` from the `RCurl` package to speed up the process of extracting all `r nrow(sen_urls)` URLs. This function allows us to download all the documents asynchronously, but it does increase CPU consumption so watch out. 
+
+```{r eval=FALSE}
+# Scrape HTML of all Senator URLs
+sen_html <- lapply(sen_urls$senator_urls, getURIAsynchronous)
+
+# Use Senator names to name each item 
+names(sen_html) <- sen_urls$reported_by
+```
+
+## Read tables on all Senator pages
+Since all of the information on each Senator's page is contained in an HTML table, we can again rely on the custom `get.html.table()` to do most of the heavy lifting. We'll store the tables in a list and then convert the list into a data frame to make the output easier to interpret and wrangle. 
+
+```{r message=FALSE}
+# Read tables 
+sen_tables <- lapply(sen_html, function(x) get.html.table(x, use.parser = TRUE))
+names(sen_tables) <- sen_urls$reported_by
+
+# Convert to data frame
+sen_tables_df <- reshape2::melt(sen_tables) %>%
+  separate(col = V1, # separate first column
+           into = c("filed_date", "report_id"), 
+           sep = "\\n") %>%
+  mutate(filed_date = as_date(filed_date, format = "%Y-%m-%d")) %>% # change class of date column
+  select(filed_date, reported_by = L1, report_type = V3, title = V2, report_id) # reorder and rename variables
+
+# Check output
+head(sen_tables_df)
+```
+
+## Extract hyperlinks from Senator pages
+
+```{r}
+# Extract hyperlinks
+sen_hyperlinks <- lapply(sen_html, function(x) get.hyperlinks(x, use.parser = TRUE))
+
+# Convert to data frame
+sen_hyperlinks_df <- sen_hyperlinks %>%
+  reshape2::melt() %>%
+  mutate(report_id = str_extract(value, "(?<=/)([A-z]|\\-|[0-9])+$")) %>% # joining on report_id, but this time report_id can contain capital andlowercase letters
+  select(reported_by = L1, report_id, report_url = value) # reorder and rename variables
+
+# Check output
+head(sen_hyperlinks_df)
+```
+
+### Join data frames
+Just like before, we're going to join the data frames on `report_id` (and `reported_by` since we have that information in both data frames). 
+
+The final data frame, `sen_tables_joined` contains `r nrow(sen_tables_joined)` URLs, and it contains 6 columns: 
+
+* **filed_date:** Date that Senator filed report.
+* **reported_by:** Name of Senator.
+* **report_type:** One of four types of reports (annual, extension, paper, or PTR).
+* **title:** Title of report
+* **report_id:** Unique ID of report.
+* **report_url:** URL of report. 
+
+```{r}
+# Join together
+sen_tables_joined <- sen_tables_df %>%
+  right_join(sen_hyperlinks_df, by = c("report_id", "reported_by"))
+
+# Check output 
+head(sen_tables_joined)
+```
+
+```{r include=FALSE}
+# Save file
+write_csv(sen_tables_joined, "../-data-raw/sen-tables-urls.csv")
+
+# Clear workspace
+rm(list = setdiff(ls(), c("sen_tables_joined", "sec_table_joined", "sen_html", "sec_html")))
+save.image("../-data-raw/sec-senator-scrape-workspace-htmls.RData")
+```
+
+# Read Senator transactions
+Finally, we're going to scrape the data on all the reports on all of the Senators' pages. Since there are `r nrow(sen_tables_joined` URLs, we're going to break the web scraping process into segments based on `report_type`. We'll begin by scraping the URLs of the Periodic Transaction Reports (`report_type` == "Ptr"), and then we'll move on to annual reports. Since extension reports do not contain any new information, and the paper reports are in GIF format, we're going to omit those from this data collection process. 
+
+## PTR
+After filtering the PTR urls, we're going to scrape `r nrow(ptr_urls)` URLs using `getURLAsynchronous()`.
+
+```{r}
+# Filter PTR
+ptr_urls <- sen_tables_joined %>%
+  filter(report_type == "Ptr")
+
+# Check output
+head(ptr_urls)
+```
+
+```{r eval=FALSE}
+# Scrape HTML of all Senator URLs
+ptr_html <- lapply(ptr_urls$report_url, getURLAsynchronous)
+ptr_html <- set_names(ptr_html, ptr_urls$report_id)
+```
+
+### Read tables & extract hyperlinks on all PTR pages
+Since some of the PTR pages don't contain tables/information, we're going to perform the `get.table.nodes()` and `get.html.table2()` "safely" so that if there are any errors, it won't stop the functions from retrieving the tables from the HTML codes that contain them.
+
+```{r}
+safe.get.html.nodes <- safely(get.html.table.nodes, otherwise = NA)
+safe.get.html.table <- safely(get.html.table2, otherwise = NA)
+
+ptr_html_tables <- lapply(ptr_html, safe.get.html.nodes) %>%
+  lapply(., safe.get.html.table) %>%
+   sapply(., "[", "result")
+
+names(ptr_html_tables) <- ptr_urls$report_id
+```
+
+Next, we'll convert the list of data frames into a single data frame: 
+
+```{r message=FALSE}
+ptr_tables_df <- ptr_html_tables %>% 
+  reshape2::melt() %>%
+separate(col = `\nTransaction Date Status `, # separate first column
+           into = c("transaction_date", "transaction_type"), 
+           sep = "\\n") %>%
+    separate(col = `Ownership\nComment`, # separate fourth column
+           into = c("ownership", "comment"), 
+           sep = "\\n") %>%
+  mutate(transaction_date = as_date(transaction_date, format = "%Y-%m-%d")) %>% # change class of date column
+  left_join(ptr_urls, by = c("L1" = "report_id")) %>%
+  select(transaction_date, filed_date, reported_by, transaction_type, company = Issuer, amount_range = Amount, ownership, comment, report_id = L1, report_url) 
+  
+# Check output
+head(ptr_tables_df, n = 10)
+```
+
+
+## Process PTR data
+We'll wrap up the PTR data collection by processing the columns: 
+
+```{r eval=FALSE}
+ptr_tables_df %<>%
+  mutate(amount_edited = tm::removePunctuation(amount_range), 
+         min_amount = gsub(" \\d+$", "", amount_edited),
+         max_amount = gsub("^\\d+ ", "", amount_edited), 
+         max_amount = case_when(grepl("^[A-Z]", amount_edited) == TRUE ~ str_extract(amount_edited, "\\d+"), 
+                                TRUE ~ max_amount),
+         min_amount = case_when(grepl("^[A-Z]", amount_edited) == TRUE ~ str_extract(amount_edited, "\\d+"), 
+                                TRUE ~ min_amount), 
+         across(c(min_amount, max_amount), ~ trimws(.x) %>% as.numeric()), 
+         idx = row_number(), 
+         transaction_type_c = fct_collapse(transaction_type, 
+                                           "Sale" = c("Sale (Full)", "Sale (Partial)"))) %>%
+  group_by(idx) %>%
+  mutate(mean_val = mean(c(min_amount, max_amount)) %>% round()) %>%
+  ungroup() %>%
+  select(transaction_date, filed_date, reported_by, transaction_type, transaction_type_c, company, ownership, comment, amount_range, min_amount, max_amount, mean_val, report_id, report_url)
+```
+```{r}
+# Check output
+head(ptr_tables_df, n = 10)
+```
+
+```{r include=FALSE}
+# Save CSV
+write_csv(ptr_tables_df, paste0("../-data-processed/ptr-table-", Sys.Date(), ".csv"))
+save.image("../-data-raw/sec-senator-scrape-workspace-htmls.RData")
+```
+

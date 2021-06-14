@@ -1,0 +1,169 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Packages, data & functions
+library(flexdashboard)
+library(DT)
+library(tidyverse)
+library(lubridate)
+library(plotly)
+library(colorspace)
+library(shiny)
+library(shinydashboard)
+detach(package:dplyr)
+library(dplyr)
+library(plotly)
+
+options(shiny.sanitize.errors = FALSE)
+
+
+# Load data
+ptr_data <- read_csv("../-data-processed/ptr-table-edited.csv", col_types = list("D", "f", "f", "f", "f", "f", "f", "f", "n", "n", "n"))
+ptr_dt <- read_csv("../-data-processed/ptr-data-for-dt.csv", col_types = list("D", "f", "f", "f", "f", "f", "f", "f"))
+
+ptr_data <- ptr_data %>%
+  mutate(year = year(filed_date), 
+         transaction_type_c = as.character(transaction_type_c))
+
+## Header
+header <- dashboardHeader(title = "Analyzing SEC Financial Disclosure Data",
+                          titleWidth = 450)
+
+
+## Sidebar
+sidebar <- dashboardSidebar(
+  sidebarUserPanel("Created by: Cathryn Beeson-Lynch"),
+  sidebarMenu("Filter data (charts)", icon = icon("bar-chart-o"),
+             # Date range
+             dateRangeInput("duration_year", label = "Select dates to display (in years):",
+                            start = "2012-01-01", 
+                            end = Sys.Date(), 
+                            min = "2012-01-01", 
+                            max = Sys.Date(),
+                            startview = "year", 
+                            format = "yyyy")
+             ),
+  sidebarMenu(
+    # Setting id makes input$tabs give the tabName of currently-selected tab
+    id = "tabs",
+    menuItem("Senator Data", tabName = "senator-data", icon = icon("dashboard")
+             ),
+     
+    menuItem("Charts", icon = icon("bar-chart-o"),
+             menuSubItem("Senator transactions", tabName = "sen-linegraph"),
+             menuSubItem("Senators + companies", tabName = "sen-comp-bar")
+    )
+  )
+)
+
+
+
+body <- dashboardBody(
+  tabItems(
+    tabItem("senator-data",
+            h1("Senator Financial Disclosure Data"),
+                br(),
+                h2("Scraped from SEC website"),
+                dataTableOutput("ptr_dt"),
+    ),
+     tabItem("sen-linegraph",
+                h1("Line graph of Senators' financial transactions"),
+                          radioButtons("transaction_type", label = "Select transaction type to display:", 
+                          choices = c('Purchases' = 'Purchase', 
+                                      'Sales' = 'Sale', 
+                                      'Exchanges' = 'Exchange'), 
+                          selected = 'Purchase'), 
+             br(), 
+                plotlyOutput("sen_line_graph", height = "100%")
+             ),
+        tabItem("sen-comp-bar",
+                h1("Bar graph of Senators' purchase/sales activity across companies"),
+                # Senator activity
+             selectInput("select_sen",
+                         label = "Select Senator activity to display:",
+                         choices = levels(ptr_data$reported_by), 
+                         multiple = FALSE, 
+                         selected = levels(ptr_data$reported_by)[1]),
+             br(),
+                plotlyOutput("sen_comp_bar", height = "100%")
+        )
+  )
+)
+
+
+## Combined
+ui <- dashboardPage(header, sidebar, body)
+
+# SERVER
+server <- function(input, output){
+
+    # Subset data
+    ptr1_react <- reactive({
+      res1 <- ptr_data %>%
+        filter(filed_date >= input$duration_year[1], 
+             filed_date <= input$duration_year[2],
+             transaction_type_c == input$transaction_type)
+      
+      return(res1)
+
+    })
+    
+    ptr2_react <- reactive({ 
+    res2 <- ptr_data %>%
+      filter(filed_date >= input$duration_year[1], 
+             filed_date <= input$duration_year[2],
+             reported_by %in% input$select_sen) 
+    return(res2)
+
+    })
+
+
+    # Evidence frame frequency table: Brief level
+    output$ptr_dt <- renderDataTable(
+        datatable(ptr_dt, 
+            rownames = FALSE, 
+            filter = "top", 
+            extensions = "Buttons", 
+            colnames = c("File date", "Reported by", "Issuer", "Transaction type", "Ownership", "Comment", "Amount (range)", "Amount (mean)"), 
+            options = list(
+              dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+              pageLength = 20))
+    )
+
+    # Line graph 
+    output$sen_line_graph <- renderPlotly({
+ ptr1_react() %>%
+        mutate(mean_val = mean_val/1000) %>%
+        arrange(reported_by) %>%
+        ggplot(aes(x = filed_date, y = mean_val, color = reported_by)) + 
+        geom_line() + 
+        labs(x = "", y = "$ (in thousands)", color = "Senator", 
+             title = paste0(input$transaction_type, "s Over Time by Senators")) + 
+        theme_minimal()
+      
+})
+    
+    # Bar graph
+    output$sen_comp_bar <- renderPlotly({
+     ptr2_react() %>%
+          mutate(mean_val = mean_val/1000) %>%
+          ggplot(aes(x = filed_date, y = mean_val, fill = issuer)) + 
+          geom_col(position = "stack") + 
+          theme_minimal() +
+          labs(y = "$ (in thousands)", 
+               x = "", 
+               fill = "Company") + 
+        theme(legend.position = "none") +
+        facet_wrap(~transaction_type_c, scales = "free", ncol = 1)
+  
+})
+
+}
+
+shinyApp(ui = ui, server = server)
+```
+
