@@ -2,7 +2,7 @@
 title: "Scraping Senate Financial Disclosures from SEC"
 author: "Cathryn Beeson-Lynch"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
-output: html_document
+output: html_notebook
 ---
 
 ```{r setup, include=FALSE}
@@ -15,7 +15,7 @@ library(RCurl)
 library(XML)
 library(magrittr)
 library(lubridate)
-detach(package:dplyr)
+detach(package:dplyr) 
 library(dplyr)
 library(kableExtra)
 
@@ -34,7 +34,7 @@ We'll begin by extracting Senators' SEC filing pages from the SEC Senate Stock D
 ## Read HTML
 The first step is to use `read_html()` from the `rvest` package in order to extract the HTML code from the SEC Stock Disclosure page. 
 
-```{r eval=FALSE}
+```{r}
 # Read in HTML 
 sec_html <- read_html("https://sec.report/Senate-Stock-Disclosures/Filings")
 ```
@@ -105,6 +105,7 @@ head(sec_urls)
 ```
 
 ### Join data frames together
+We'll join the tables together on `report_id`, and then check the output below: 
 
 ```{r}
 # Join together
@@ -114,6 +115,7 @@ sec_table_joined <- sec_file_table %>%
 # Check output
 head(sec_table_joined)
 ```
+
 ### View summary 
 We can use `count()` from the `dplyr` package to check out variation in the types of reports that Senators filed:  
 
@@ -189,6 +191,7 @@ head(sen_tables_df)
 ```
 
 ## Extract hyperlinks from Senator pages
+Next, we'll use the custom `get.hyperlinks()` function with the argument `use.parser = TRUE`. Then we'll convert the output into a data frame, and we'll check out the results.
 
 ```{r}
 # Extract hyperlinks
@@ -235,7 +238,7 @@ save.image("../-data-raw/sec-senator-scrape-workspace-htmls.RData")
 ```
 
 # Read Senator transactions
-Finally, we're going to scrape the data on all the reports on all of the Senators' pages. Since there are `r nrow(sen_tables_joined` URLs, we're going to break the web scraping process into segments based on `report_type`. We'll begin by scraping the URLs of the Periodic Transaction Reports (`report_type` == "Ptr"), and then we'll move on to annual reports. Since extension reports do not contain any new information, and the paper reports are in GIF format, we're going to omit those from this data collection process. 
+Finally, we're going to scrape the data on all the reports on all of the Senators' pages. Since there are `r nrow(sen_tables_joined)` URLs, we're going to break the web scraping process into segments based on `report_type`. We'll begin by scraping the URLs of the Periodic Transaction Reports (`report_type` == "Ptr"), and then we'll move on to annual reports. Since extension reports do not contain any new information, and the paper reports are in GIF format, we're going to omit those from this data collection process. 
 
 ## PTR
 After filtering the PTR urls, we're going to scrape `r nrow(ptr_urls)` URLs using `getURLAsynchronous()`.
@@ -297,18 +300,23 @@ ptr_tables_df %<>%
   mutate(amount_edited = tm::removePunctuation(amount_range), 
          min_amount = gsub(" \\d+$", "", amount_edited),
          max_amount = gsub("^\\d+ ", "", amount_edited), 
-         max_amount = case_when(grepl("^[A-Z]", amount_edited) == TRUE ~ str_extract(amount_edited, "\\d+"), 
+         max_amount = case_when(grepl("^[A-Z]", amount_edited) == TRUE ~ 
+                                  str_extract(amount_edited, "\\d+"), 
                                 TRUE ~ max_amount),
-         min_amount = case_when(grepl("^[A-Z]", amount_edited) == TRUE ~ str_extract(amount_edited, "\\d+"), 
+         min_amount = case_when(grepl("^[A-Z]", amount_edited) == TRUE ~ 
+                                  str_extract(amount_edited, "\\d+"), 
                                 TRUE ~ min_amount), 
          across(c(min_amount, max_amount), ~ trimws(.x) %>% as.numeric()), 
          idx = row_number(), 
          transaction_type_c = fct_collapse(transaction_type, 
-                                           "Sale" = c("Sale (Full)", "Sale (Partial)"))) %>%
+                                           "Sale" = c("Sale (Full)", 
+                                                      "Sale (Partial)"))) %>%
   group_by(idx) %>%
   mutate(mean_val = mean(c(min_amount, max_amount)) %>% round()) %>%
   ungroup() %>%
-  select(transaction_date, filed_date, reported_by, transaction_type, transaction_type_c, company, ownership, comment, amount_range, min_amount, max_amount, mean_val, report_id, report_url)
+  select(transaction_date, filed_date, reported_by, transaction_type, 
+         transaction_type_c, company, ownership, comment, amount_range, 
+         min_amount, max_amount, mean_val, report_id, report_url)
 ```
 ```{r}
 # Check output
@@ -318,6 +326,5 @@ head(ptr_tables_df, n = 10)
 ```{r include=FALSE}
 # Save CSV
 write_csv(ptr_tables_df, paste0("../-data-processed/ptr-table-", Sys.Date(), ".csv"))
-save.image("../-data-raw/sec-senator-scrape-workspace-htmls.RData")
+save.image("/-data-raw/sec-senator-scrape-workspace-htmls.RData")
 ```
-
